@@ -1,11 +1,6 @@
 {
-  "name": "unote",
-  "version": "1.0.1",
-  "description": "A stupidly simple way to take notes in class. Made to work without installing anything on the client.",
-  "license": "GPL-3.0",
-  "author": "DvidPI",
+  "private": true,
   "type": "commonjs",
-  "main": "server.js",
   "scripts": {
     "start": "node server.js",
     "dev": "nodemon server.js"
