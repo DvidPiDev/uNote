@@ -1,0 +1,23 @@
+@import "tailwindcss";
+@import "@catppuccin/tailwindcss/mocha.css";
+@import "@catppuccin/tailwindcss/frappe.css";
+@import "@catppuccin/tailwindcss/macchiato.css";
+
+.login-bg {
+    background-image: url("./static/bg.jpg")
+}
+
+.backdrop-anim {
+    animation: blur-in 250ms 0s forwards;
+}
+
+@keyframes blur-in {
+    from {
+        backdrop-filter: blur(0px);
+        opacity: 0;
+    }
+    to {
+        backdrop-filter: blur(8px);
+        opacity: 1;
+    }
+}
