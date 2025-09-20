@@ -514,7 +514,7 @@ const App = () => {
       );
     } else if (type === 'sidebar') {
       items.push(
-        { icon: <Plus size={16} />, label: 'New Note', onClick: () => createNote() },
+        //{ icon: <Plus size={16} />, label: 'New Note', onClick: () => createNote() }, TODO: renaming doesn't work for notes in the root folder
         { icon: <FolderPlus size={16} />, label: 'New Subject', onClick: () => {
             // TODO: replace with inline input later
             const name = prompt('Subject name:');
