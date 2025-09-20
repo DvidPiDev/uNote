@@ -6,12 +6,10 @@ const speakeasy = require('speakeasy');
 const qrcode = require('qrcode');
 const { v4: uuidv4 } = require('uuid');
 const jwt = require('jsonwebtoken');
-const multer = require("multer");
-const sharp = require("sharp"); // for thumbnails
 
 const DATA_DIR = path.join(__dirname, 'data');
 const USERS_FILE = path.join(DATA_DIR, 'users.json');
-const JWT_SECRET = process.env.JWT_SECRET || 'ASDHJKASHDKJLHAJHCIHIUSDKJVSD';
+const JWT_SECRET = process.env.JWT_SECRET || 'ASDHJKASHDKJLHAJHCIHIUSDKJVSD'; // doesn't have to be very secure, everything is unencrypted anyway
 
 const PORT = process.env.PORT || 4000;
 const app = express();
@@ -20,33 +18,8 @@ app.use(cors());
 app.use(express.json());
 app.use(express.static(path.join(__dirname, 'client')));
 
-const storage = multer.diskStorage({
-  destination: function (req, file, cb) {
-    const userDir = path.join(__dirname, "user_data", req.user.id, "uploads");
-    fs.mkdirSync(userDir, { recursive: true });
-    cb(null, userDir);
-  },
-  filename: function (req, file, cb) {
-    cb(null, Date.now() + "-" + file.originalname);
-  }
-});
-
-const upload = multer({ storage });
-
 if (!fs.existsSync(DATA_DIR)) fs.mkdirSync(DATA_DIR, { recursive: true });
 if (!fs.existsSync(USERS_FILE)) fs.writeFileSync(USERS_FILE, JSON.stringify([] , null, 2), 'utf8');
-
-function authenticateToken(req, res, next) {
-  const authHeader = req.headers["authorization"];
-  const token = authHeader && authHeader.split(" ")[1];
-  if (!token) return res.sendStatus(401);
-
-  jwt.verify(token, process.env.JWT_SECRET, (err, user) => {
-    if (err) return res.sendStatus(403);
-    req.user = user; // <- makes req.user.id available
-    next();
-  });
-}
 
 function readUsers() {
   try {
@@ -443,70 +416,6 @@ app.post('/api/user/note/move', authMiddleware, (req, res) => {
     console.error(err);
     res.status(500).json({ error: 'Failed to move note' });
   }
-});
-
-app.post("/api/user/upload/new", authenticateToken, upload.single("file"), (req, res) => {
-  if (!req.file) return res.status(400).json({ error: "No file uploaded" });
-  res.json({ success: true, file: req.file.filename });
-});
-
-app.post("/api/user/upload/delete", authenticateToken, (req, res) => {
-  const { fileName } = req.body;
-  const userDir = path.join(__dirname, "user_data", req.user.id, "uploads");
-  const filePath = path.join(userDir, fileName);
-  const thumbPath = path.join(userDir, "thumbs", fileName);
-
-  if (fs.existsSync(filePath)) fs.unlinkSync(filePath);
-  if (fs.existsSync(thumbPath)) fs.unlinkSync(thumbPath);
-
-  res.json({ success: true });
-});
-
-app.post("/api/user/upload/rename", authenticateToken, (req, res) => {
-  const { oldName, newName } = req.body;
-  const userDir = path.join(__dirname, "user_data", req.user.id, "uploads");
-  const oldPath = path.join(userDir, oldName);
-  const newPath = path.join(userDir, newName);
-
-  if (!fs.existsSync(oldPath)) return res.status(404).json({ error: "File not found" });
-  fs.renameSync(oldPath, newPath);
-  res.json({ success: true, newName });
-});
-
-app.post("/api/user/upload/thumb", authenticateToken, async (req, res) => {
-  const { fileName } = req.body;
-  const userDir = path.join(__dirname, "user_data", req.user.id, "uploads");
-  const thumbsDir = path.join(userDir, "thumbs");
-  fs.mkdirSync(thumbsDir, { recursive: true });
-
-  const inputPath = path.join(userDir, fileName);
-  const outputPath = path.join(thumbsDir, fileName);
-
-  if (!fs.existsSync(inputPath)) return res.status(404).json({ error: "File not found" });
-
-  await sharp(inputPath).resize(200).toFile(outputPath);
-  res.sendFile(outputPath);
-});
-
-app.post("/api/user/upload", authenticateToken, (req, res) => {
-  const { fileName } = req.body;
-  const userDir = path.join(__dirname, "user_data", req.user.id, "uploads");
-  const filePath = path.join(userDir, fileName);
-
-  if (!fs.existsSync(filePath)) return res.status(404).json({ error: "File not found" });
-  res.sendFile(filePath);
-});
-
-app.get("/api/user/uploads", authenticateToken, (req, res) => {
-  const userDir = path.join(__dirname, "user_data", req.user.id, "uploads");
-  fs.mkdirSync(userDir, { recursive: true });
-
-  const files = fs.readdirSync(userDir).map(f => {
-    const stats = fs.statSync(path.join(userDir, f));
-    return { name: f, uploaded: stats.birthtime };
-  });
-
-  res.json(files);
 });
 
 app.listen(PORT, () => {
