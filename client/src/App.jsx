@@ -1,31 +1,39 @@
 import React, { useState, useEffect, useRef } from 'react';
 import { Search, Plus, LogOut, Eye, Edit, FileText, Save, Menu, X, FolderPlus, File, Folder } from 'lucide-react';
 
+// Small helper to format dates
 const formatTime = (isoString) => {
   const date = new Date(isoString);
   return date.toLocaleString();
 };
 
+// Lightweight API wrapper — fixed header merge and safer error parsing
 const api = {
   async request(endpoint, options = {}) {
     const token = localStorage.getItem('token');
+
+    // ensure headers is an object before spreading
+    const optsHeaders = options.headers || {};
     const headers = {
       'Content-Type': 'application/json',
       ...(token && { Authorization: `Bearer ${token}` }),
-      ...options.headers,
+      ...optsHeaders,
     };
 
-    const response = await fetch(`/api${endpoint}`, {
+    const res = await fetch(`/api${endpoint}`, {
       ...options,
       headers,
     });
 
-    if (!response.ok) {
-      const error = await response.json().catch(() => ({ error: 'Network error' }));
-      throw new Error(error.error || 'Request failed');
+    if (!res.ok) {
+      // try best-effort parse
+      const error = await res.json().catch(() => ({ error: res.statusText || 'Network error' }));
+      throw new Error(error.error || error.message || 'Request failed');
     }
 
-    return response.json();
+    // handle no-content responses gracefully
+    if (res.status === 204) return null;
+    return res.json().catch(() => null);
   },
 
   async getNewTotp() {
@@ -189,9 +197,9 @@ const Auth = ({ onLogin }) => {
     try {
       const result = await api.login(totpCode || code);
       localStorage.setItem('token', result.token);
+      // call parent's onLogin — App will react to user state and load data
       onLogin(result.user);
-
-      window.location.reload(); // <-- sidebar stays empty until manual reload if this isn't here
+      // removed window.location.reload hack
     } catch (err) {
       if (err.message === 'Invalid code' && !isSignup) {
         setIsSignup(true);
@@ -304,15 +312,15 @@ const App = () => {
   const [contextMenu, setContextMenu] = useState(null);
   const [searchOpen, setSearchOpen] = useState(false);
   const [searchTerm, setSearchTerm] = useState('');
-  const [saveStatus, setSaveStatus] = useState('saved'); // 'saved', 'saving', 'error'
+  const [saveStatus, setSaveStatus] = useState('saved'); // 'saved', 'saving', 'error', 'unsaved'
   const [draggedNote, setDraggedNote] = useState(null);
   const [dragOver, setDragOver] = useState(null);
   const [renaming, setRenaming] = useState(null); // {type, id}
   const [pendingDelete, setPendingDelete] = useState(null); // {type, id}
-  const [searchIndex, setSearchIndex] = useState(0);
 
   const editorRef = useRef(null);
   const lastSaveRef = useRef('');
+  const autosaveTimer = useRef(null);
 
   useEffect(() => {
     const initApp = async () => {
@@ -338,10 +346,29 @@ const App = () => {
     initApp();
   }, []);
 
+  // When a user logs in (onLogin from Auth) we need to fetch user data
+  useEffect(() => {
+    if (!user) return;
+    // load subjects/notes when the user becomes available
+    (async () => {
+      try {
+        setLoading(true);
+        await loadSubjects();
+        await loadNotes();
+      } catch (err) {
+        console.error('Load after login error:', err);
+      } finally {
+        setLoading(false);
+      }
+    })();
+  }, [user]);
+
+  // keyboard shortcuts
   useEffect(() => {
     const handleKeydown = (e) => {
-      // ctrl + s
-      if (e.ctrlKey && e.key === 's') {
+      const key = e.key.toLowerCase();
+      // ctrl/cmd + s
+      if ((e.ctrlKey || e.metaKey) && key === 's') {
         e.preventDefault();
         if (currentNote) {
           saveNote();
@@ -351,7 +378,7 @@ const App = () => {
 
     document.addEventListener('keydown', handleKeydown);
     return () => document.removeEventListener('keydown', handleKeydown);
-  }, [currentNote]);
+  }, [currentNote, noteContent]);
 
   useEffect(() => {
     const handleKey = (e) => {
@@ -378,11 +405,10 @@ const App = () => {
     };
   }, [searchOpen]);
 
-
   const loadSubjects = async () => {
     try {
       const data = await api.getSubjects();
-      setSubjects(data);
+      setSubjects(data || {});
     } catch (err) {
       console.error('Load subjects error:', err);
     }
@@ -391,7 +417,7 @@ const App = () => {
   const loadNotes = async (subject = null) => {
     try {
       const data = await api.getNotes(subject);
-      setNotes(data);
+      setNotes(data || []);
     } catch (err) {
       console.error('Load notes error:', err);
     }
@@ -402,8 +428,8 @@ const App = () => {
       setSaveStatus('saved');
       const data = await api.getNote(note.path);
       setCurrentNote(note);
-      setNoteContent(data.content);
-      lastSaveRef.current = data.content;
+      setNoteContent(data?.content || '');
+      lastSaveRef.current = data?.content || '';
     } catch (err) {
       console.error('Open note error:', err);
     }
@@ -423,9 +449,40 @@ const App = () => {
     }
   };
 
+  // Auto-save: debounce changes and save if content changed
+  useEffect(() => {
+    if (!currentNote) return;
+
+    // clear previous timer
+    if (autosaveTimer.current) clearTimeout(autosaveTimer.current);
+
+    if (noteContent === lastSaveRef.current) {
+      setSaveStatus('saved');
+      return;
+    }
+
+    setSaveStatus('unsaved');
+
+    autosaveTimer.current = setTimeout(async () => {
+      try {
+        setSaveStatus('saving');
+        await api.saveNote(currentNote.path, noteContent);
+        lastSaveRef.current = noteContent;
+        setSaveStatus('saved');
+      } catch (err) {
+        console.error('Autosave error:', err);
+        setSaveStatus('error');
+      }
+    }, 1500);
+
+    return () => {
+      if (autosaveTimer.current) clearTimeout(autosaveTimer.current);
+    };
+  }, [noteContent, currentNote]);
+
   const createNote = async (subject = null, title = '') => {
     try {
-      const result = await api.createNote(subject, title);
+      const result = await api.createNote(subject, "New note");
       await loadNotes();
       const newNote = { path: result.path, name: result.path.split('/').pop(), subject };
       await openNote(newNote);
@@ -473,6 +530,11 @@ const App = () => {
 
   const createSubject = async (name) => {
     try {
+      if (!name) {
+        const n = prompt('Subject name:');
+        if (!n) return;
+        name = n;
+      }
       await api.createSubject(name);
       await loadSubjects();
     } catch (err) {
@@ -514,12 +576,8 @@ const App = () => {
       );
     } else if (type === 'sidebar') {
       items.push(
-        //{ icon: <Plus size={16} />, label: 'New Note', onClick: () => createNote() }, TODO: renaming doesn't work for notes in the root folder
-        { icon: <FolderPlus size={16} />, label: 'New Subject', onClick: () => {
-            // TODO: replace with inline input later
-            const name = prompt('Subject name:');
-            if (name) createSubject(name);
-          }}
+        //{ icon: <Plus size={16} />, label: 'New Note', onClick: () => createNote() },
+        { icon: <FolderPlus size={16} />, label: 'New Subject', onClick: () => createSubject() }
       );
     }
 
@@ -576,16 +634,41 @@ const App = () => {
     setRenaming({ type: 'note', id: note.path });
   };
 
+  // Basic markdown renderer: improved to handle code blocks and inline code + escape
+  const escapeHtml = (str) =>
+    str
+      .replace(/&/g, '&amp;')
+      .replace(/</g, '&lt;')
+      .replace(/>/g, '&gt;')
+      .replace(/"/g, '&quot;')
+      .replace(/'/g, '&#39;');
+
   const renderMarkdown = (content) => {
-    // TODO: basic regex based renderer for now - THIS WILL BE EXPANDED!!!
-    return content
-      .replace(/\*\*\*(.*?)\*\*\*/g, '<strong><em>$1</em></strong>')
-      .replace(/\*\*(.*?)\*\*/g, '<strong>$1</strong>')
-      .replace(/\*(.*?)\*/g, '<em>$1</em>')
-      .replace(/^# (.*$)/gim, '<h1>$1</h1>')
-      .replace(/^## (.*$)/gim, '<h2>$1</h2>')
-      .replace(/^### (.*$)/gim, '<h3>$1</h3>')
-      .replace(/\n/g, '<br>');
+    if (!content) return '';
+
+    // first handle fenced code blocks ```lang\n...``` (keep raw content inside)
+    let out = content.replace(/```([a-zA-Z0-9-_]*)\n([\s\S]*?)```/g, (m, lang, code) => {
+      return `<pre class="code-block"><code data-lang="${escapeHtml(lang)}">${escapeHtml(code)}</code></pre>`;
+    });
+
+    // inline code `...`
+    out = out.replace(/`([^`]+)`/g, (m, code) => `<code>${escapeHtml(code)}</code>`);
+
+    // headings
+    out = out.replace(/^### (.*$)/gim, '<h3>$1</h3>');
+    out = out.replace(/^## (.*$)/gim, '<h2>$1</h2>');
+    out = out.replace(/^# (.*$)/gim, '<h1>$1</h1>');
+
+    // bold/italic (simple)
+    out = out.replace(/\*\*\*(.*?)\*\*\*/g, '<strong><em>$1</em></strong>');
+    out = out.replace(/\*\*(.*?)\*\*/g, '<strong>$1</strong>');
+    out = out.replace(/\*(.*?)\*/g, '<em>$1</em>');
+
+    // paragraphs / line breaks (simple)
+    out = out.replace(/\n{2,}/g, '</p><p>');
+    out = `<p>${out.replace(/\n/g, '<br>')}</p>`;
+
+    return out;
   };
 
   const filteredNotes = notes.filter(note =>
@@ -607,32 +690,119 @@ const App = () => {
         style={{ width: sidebarWidth, minWidth: 250 }}
         onContextMenu={(e) => handleRightClick(e, 'sidebar')}
       >
-          {/* sidebar header */}
-          <div className="p-4 border-b border-ctp-text/10">
-            <h2 className="font-semibold text-ctp-text">μNotes</h2>
+        {/* sidebar header */}
+        <div className="p-4 border-b border-ctp-text/10">
+          <h2 className="font-semibold text-ctp-text">μNotes</h2>
+        </div>
+
+        {/* Notes Tree */}
+        <div className="flex-1 overflow-y-auto">
+          {/* Root notes */}
+          <div
+            onDragOver={(e) => handleDragOver(e, null)}
+            onDragLeave={handleDragLeave}
+            onDrop={(e) => handleDrop(e, null)}
+          >
+            {notes.filter(note => !note.subject).map(note => (
+              <div
+                key={note.path}
+                draggable
+                onDragStart={(e) => handleDragStart(e, note)}
+                className="flex items-center px-4 py-2 hover:bg-ctp-text/5 cursor-pointer group relative transition-colors duration-300"
+                onDoubleClick={() => openNote(note)}
+                onContextMenu={(e) => handleRightClick(e, 'note', note)}
+              >
+                <File size={16} className="mr-2 text-ctp-text" />
+                <span className="text-sm text-ctp-text truncate flex-1">
+                    {note.name.replace('.md', '')}
+                  </span>
+                {currentNote && currentNote.path === note.path && (
+                  <div className={`w-2 h-2 rounded-full ml-2 ${
+                    saveStatus === 'saved' ? 'bg-ctp-green-400' :
+                      saveStatus === 'saving' ? 'bg-ctp-yellow-400 animate-pulse' :
+                        'bg-ctp-red-400'
+                  }`} />
+                )}
+              </div>
+            ))}
           </div>
 
-          {/* Notes Tree */}
-          <div className="flex-1 overflow-y-auto">
-            {/* Root notes */}
-            <div
-              onDragOver={(e) => handleDragOver(e, null)}
-              onDragLeave={handleDragLeave}
-              onDrop={(e) => handleDrop(e, null)}
-            >
-              {notes.filter(note => !note.subject).map(note => (
+          {/* Subjects */}
+          {Object.keys(subjects).map(subjectName => (
+            <div key={subjectName} className="mb-2">
+              <div
+                className={`flex items-center px-4 py-2 hover:bg-ctp-text/5 cursor-pointer font-medium transition-colors duration-300 ${
+                  dragOver === subjectName ? 'bg-ctp-sapphire-800/10' : ''
+                }`}
+                onContextMenu={(e) => handleRightClick(e, 'subject', { name: subjectName })}
+                onDoubleClick={() => createNote(subjectName)}
+                onDragOver={(e) => handleDragOver(e, subjectName)}
+                onDragLeave={handleDragLeave}
+                onDrop={(e) => handleDrop(e, subjectName)}
+              >
+                <Folder size={16} className="mr-2 text-ctp-text" />
+                {renaming?.type === 'subject' && renaming.id === subjectName ? (
+                  <input
+                    type="text"
+                    defaultValue={subjectName}
+                    autoFocus
+                    onBlur={async (e) => {
+                      const newName = e.target.value.trim();
+                      if (newName && newName !== subjectName) {
+                        await api.renameSubject(subjectName, newName);
+                        await loadSubjects();
+                        await loadNotes();
+                      }
+                      setRenaming(null);
+                    }}
+                    onKeyDown={(e) => {
+                      if (e.key === 'Enter') e.target.blur();
+                    }}
+                    className="bg-ctp-mantle text-ctp-text px-1 rounded"
+                  />
+                ) : (
+                  <span className="text-sm text-ctp-text truncate">{subjectName}</span>
+                )}
+              </div>
+
+              {/* Subject notes */}
+              {notes.filter(note => note.subject === subjectName).map(note => (
                 <div
                   key={note.path}
                   draggable
                   onDragStart={(e) => handleDragStart(e, note)}
-                  className="flex items-center px-4 py-2 hover:bg-ctp-text/5 cursor-pointer group relative transition-colors duration-300"
+                  className="flex items-center pl-8 pr-4 py-1 hover:bg-ctp-text/5 cursor-pointer group relative transition-colors duration-300"
                   onDoubleClick={() => openNote(note)}
                   onContextMenu={(e) => handleRightClick(e, 'note', note)}
                 >
-                  <File size={16} className="mr-2 text-ctp-text" />
-                  <span className="text-sm text-ctp-text truncate flex-1">
-                    {note.name.replace('.md', '')}
-                  </span>
+                  <File size={14} className="mr-2 text-ctp-text/80" />
+                  {renaming?.type === 'note' && renaming.id === note.path ? (
+                    <input
+                      type="text"
+                      defaultValue={note.name.replace('.md','')}
+                      autoFocus
+                      onBlur={async (e) => {
+                        const newName = e.target.value.trim();
+                        if (newName && newName !== note.name.replace('.md','')) {
+                          await api.renameNote(note.path, newName);
+                          await loadNotes();
+                          if (currentNote && currentNote.path === note.path) {
+                            const newPath = note.path.replace(note.name, `${newName}`);
+                            setCurrentNote({ ...currentNote, path: newPath, name: `${newName}` });
+                          }
+                        }
+                        setRenaming(null);
+                      }}
+                      onKeyDown={(e) => {
+                        if (e.key === 'Enter') e.target.blur();
+                      }}
+                      className="bg-ctp-mantle text-ctp-text px-1 rounded"
+                    />
+                  ) : (
+                    <span className="text-sm text-ctp-text truncate flex-1">
+                        {note.name.replace('.md','')}
+                      </span>
+                  )}
                   {currentNote && currentNote.path === note.path && (
                     <div className={`w-2 h-2 rounded-full ml-2 ${
                       saveStatus === 'saved' ? 'bg-ctp-green-400' :
@@ -643,129 +813,42 @@ const App = () => {
                 </div>
               ))}
             </div>
+          ))}
+        </div>
 
-            {/* Subjects */}
-            {Object.keys(subjects).map(subjectName => (
-              <div key={subjectName} className="mb-2">
-                <div
-                  className={`flex items-center px-4 py-2 hover:bg-ctp-text/5 cursor-pointer font-medium transition-colors duration-300 ${
-                    dragOver === subjectName ? 'bg-ctp-sapphire-800/10' : ''
-                  }`}
-                  onContextMenu={(e) => handleRightClick(e, 'subject', { name: subjectName })}
-                  onDoubleClick={() => createNote(subjectName)}
-                  onDragOver={(e) => handleDragOver(e, subjectName)}
-                  onDragLeave={handleDragLeave}
-                  onDrop={(e) => handleDrop(e, subjectName)}
-                >
-                  <Folder size={16} className="mr-2 text-ctp-text" />
-                  {renaming?.type === 'subject' && renaming.id === subjectName ? (
-                    <input
-                      type="text"
-                      defaultValue={subjectName}
-                      autoFocus
-                      onBlur={async (e) => {
-                        const newName = e.target.value.trim();
-                        if (newName && newName !== subjectName) {
-                          await api.renameSubject(subjectName, newName);
-                          await loadSubjects();
-                          await loadNotes();
-                        }
-                        setRenaming(null);
-                      }}
-                      onKeyDown={(e) => {
-                        if (e.key === 'Enter') e.target.blur();
-                      }}
-                      className="bg-ctp-mantle text-ctp-text px-1 rounded"
-                    />
-                  ) : (
-                    <span className="text-sm text-ctp-text truncate">{subjectName}</span>
-                  )}
-                </div>
-
-                {/* Subject notes */}
-                {notes.filter(note => note.subject === subjectName).map(note => (
-                  <div
-                    key={note.path}
-                    draggable
-                    onDragStart={(e) => handleDragStart(e, note)}
-                    className="flex items-center pl-8 pr-4 py-1 hover:bg-ctp-text/5 cursor-pointer group relative transition-colors duration-300"
-                    onDoubleClick={() => openNote(note)}
-                    onContextMenu={(e) => handleRightClick(e, 'note', note)}
-                  >
-                    <File size={14} className="mr-2 text-ctp-text/80" />
-                    {renaming?.type === 'note' && renaming.id === note.path ? (
-                      <input
-                        type="text"
-                        defaultValue={note.name.replace('.md','')}
-                        autoFocus
-                        onBlur={async (e) => {
-                          const newName = e.target.value.trim();
-                          if (newName && newName !== note.name.replace('.md','')) {
-                            await api.renameNote(note.path, newName);
-                            await loadNotes();
-                            if (currentNote && currentNote.path === note.path) {
-                              const newPath = note.path.replace(note.name, `${newName}.md`);
-                              setCurrentNote({ ...currentNote, path: newPath, name: `${newName}.md` });
-                            }
-                          }
-                          setRenaming(null);
-                        }}
-                        onKeyDown={(e) => {
-                          if (e.key === 'Enter') e.target.blur();
-                        }}
-                        className="bg-ctp-mantle text-ctp-text px-1 rounded"
-                      />
-                    ) : (
-                      <span className="text-sm text-ctp-text truncate flex-1">
-    {note.name.replace('.md','')}
-  </span>
-                    )}
-                    {currentNote && currentNote.path === note.path && (
-                      <div className={`w-2 h-2 rounded-full ml-2 ${
-                        saveStatus === 'saved' ? 'bg-ctp-green-400' :
-                          saveStatus === 'saving' ? 'bg-ctp-yellow-400 animate-pulse' :
-                            'bg-ctp-red-400'
-                      }`} />
-                    )}
-                  </div>
-                ))}
-              </div>
-            ))}
-          </div>
-
-          {/* Sidebar Footer */}
-          <div className="border-t border-ctp-text/10 p-3 flex items-center justify-between">
-            <div className="flex items-center space-x-2">
-              <button
-                onClick={() => {
-                  const modes = ['read', 'both', 'edit'];
-                  const currentIndex = modes.indexOf(viewMode);
-                  setViewMode(modes[(currentIndex + 1) % modes.length]);
-                }}
-                className="p-2 rounded-lg hover:bg-ctp-text/10 transition-colors duration-300 text-ctp-text"
-                title="View mode"
-              >
-                {viewMode === 'read' ? <Eye size={16} /> :
-                  viewMode === 'both' ? <FileText size={16} /> :
-                    <Edit size={16} />}
-              </button>
-              <button
-                onClick={() => createNote()}
-                className="p-2 rounded-lg hover:bg-ctp-text/10 transition-colors duration-300 text-ctp-text"
-                title="New note"
-              >
-                <Plus size={16} />
-              </button>
-            </div>
+        {/* Sidebar Footer */}
+        <div className="border-t border-ctp-text/10 p-3 flex items-center justify-between">
+          <div className="flex items-center space-x-2">
             <button
-              onClick={logout}
-              className="p-2 rounded-lg hover:bg-ctp-red-900/10 transition-colors duration-300 text-ctp-red-500"
-              title="Logout"
+              onClick={() => {
+                const modes = ['read', 'both', 'edit'];
+                const currentIndex = modes.indexOf(viewMode);
+                setViewMode(modes[(currentIndex + 1) % modes.length]);
+              }}
+              className="p-2 rounded-lg hover:bg-ctp-text/10 transition-colors duration-300 text-ctp-text"
+              title="View mode"
             >
-              <LogOut size={16} />
+              {viewMode === 'read' ? <Eye size={16} /> :
+                viewMode === 'both' ? <FileText size={16} /> :
+                  <Edit size={16} />}
+            </button>
+            <button
+              onClick={() => createNote()}
+              className="p-2 rounded-lg hover:bg-ctp-text/10 transition-colors duration-300 text-ctp-text"
+              title="New note"
+            >
+              <Plus size={16} />
             </button>
           </div>
+          <button
+            onClick={logout}
+            className="p-2 rounded-lg hover:bg-ctp-red-900/10 transition-colors duration-300 text-ctp-red-500"
+            title="Logout"
+          >
+            <LogOut size={16} />
+          </button>
         </div>
+      </div>
 
       {/* Main Content */}
       <div
@@ -800,7 +883,7 @@ const App = () => {
           <button
             onClick={() => setSearchOpen(true)}
             className="p-2 rounded-lg hover:bg-ctp-text/10 transition-colors duration-300 text-ctp-text"
-            title="Search (Ctrl+Ctrl)"
+            title="Search (Tab)"
           >
             <Search size={20} />
           </button>
@@ -819,7 +902,7 @@ const App = () => {
                     onChange={(e) => setNoteContent(e.target.value)}
                     className="w-full h-full resize-none border-none outline-none bg-transparent text-ctp-text font-mono text-sm leading-relaxed"
                     placeholder="Start writing..."
-                    spellCheck
+                    spellCheck={false}
                   />
                 </div>
               )}
